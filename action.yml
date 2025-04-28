@@ -1,0 +1,32 @@
+name: 'GitHub Package Statistics'
+description: 'Collect package statistics from a GitHub organization'
+author: 'GitHub'
+
+inputs:
+  org:
+    description: 'GitHub organization to collect package statistics from'
+    required: true
+  mode:
+    description: 'Output mode: "simple" or "detailed"'
+    required: false
+    default: 'simple'
+  token:
+    description: 'GitHub Personal Access Token (PAT) for authentication. Either token or app authentication is required.'
+    required: false
+  app-id:
+    description: 'GitHub App ID for authentication. Required if using App authentication.'
+    required: false
+  private-key:
+    description: 'GitHub App private key for authentication. Required if using App authentication.'
+    required: false
+  installation-id:
+    description: 'GitHub App installation ID for authentication. Required if using App authentication.'
+    required: false
+
+outputs:
+  package-stats:
+    description: 'JSON string containing the package statistics'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'

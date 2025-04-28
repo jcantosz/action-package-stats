@@ -33189,194 +33189,286 @@ var external_url_ = __nccwpck_require__(7016);
 // Create a custom Octokit class with pagination, retry and throttling plugins
 const MyOctokit = Octokit.plugin(paginateRest, retry, throttling);
 
+/**
+ * Creates an authenticated Octokit instance with plugins
+ * @param {string} token - Personal Access Token
+ * @param {string} appId - GitHub App ID
+ * @param {string} privateKey - GitHub App Private Key
+ * @param {string} installationId - GitHub App Installation ID
+ * @returns {Octokit} - Authenticated Octokit instance
+ */
+function createOctokit(token, appId, privateKey, installationId) {
+  // Common options for Octokit including throttling configuration
+  const octokitOptions = {
+    throttle: {
+      onRateLimit: (retryAfter, options, octokit) => {
+        octokit.log.warn(`Request quota exhausted for request ${options.method} ${options.url}`);
+        
+        // Retry twice after hitting a rate limit
+        if (options.request.retryCount <= 2) {
+          console.log(`Retrying after ${retryAfter} seconds!`);
+          return true;
+        }
+      },
+      onSecondaryRateLimit: (retryAfter, options, octokit) => {
+        // Secondary rate limit (abuse detection) is triggered
+        octokit.log.warn(`Secondary rate limit detected for request ${options.method} ${options.url}`);
+        
+        // Always retry after hitting a secondary rate limit
+        console.log(`Retrying after ${retryAfter} seconds!`);
+        return true;
+      },
+    },
+    retry: {
+      retries: 3,
+      retryAfter: 180,
+    },
+  };
+
+  // Create Octokit instance based on available authentication
+  if (token) {
+    // Authenticate using Personal Access Token
+    console.log("Authenticating with Personal Access Token");
+    return new MyOctokit({
+      auth: token,
+      ...octokitOptions,
+    });
+  } else if (appId && privateKey && installationId) {
+    // Authenticate using GitHub App
+    console.log("Authenticating with GitHub App");
+    return new MyOctokit({
+      authStrategy: createAppAuth,
+      auth: {
+        appId,
+        privateKey,
+        installationId,
+      },
+      ...octokitOptions,
+    });
+  } else {
+    throw new Error(
+      "Authentication is required. Please provide either a Personal Access Token (token) or GitHub App credentials (app-id, private-key, and installation-id)."
+    );
+  }
+}
+
 async function run() {
   try {
     // Get inputs using actions/core instead of environment variables
     const org = core.getInput("org") || "octokit";
-    const outputMode = core.getInput("mode") || "simple"; // Default to simple if not specified
-
+    const outputMode = core.getInput("mode") || "org-level"; // Default to org-level if not specified
+    
     console.log(`Running in ${outputMode} mode for organization: ${org}`);
 
-    // Check authentication method
+    // Get authentication inputs
     const token = core.getInput("token");
     const appId = core.getInput("app-id");
     const privateKey = core.getInput("private-key");
     const installationId = core.getInput("installation-id");
-
-    // Common options for Octokit including throttling configuration
-    const octokitOptions = {
-      throttle: {
-        onRateLimit: (retryAfter, options, octokit) => {
-          octokit.log.warn(`Request quota exhausted for request ${options.method} ${options.url}`);
-
-          // Retry twice after hitting a rate limit
-          if (options.request.retryCount <= 2) {
-            console.log(`Retrying after ${retryAfter} seconds!`);
-            return true;
-          }
-        },
-        onSecondaryRateLimit: (retryAfter, options, octokit) => {
-          // Secondary rate limit (abuse detection) is triggered
-          octokit.log.warn(`Secondary rate limit detected for request ${options.method} ${options.url}`);
-
-          // Always retry after hitting a secondary rate limit
-          console.log(`Retrying after ${retryAfter} seconds!`);
-          return true;
-        },
-      },
-      retry: {
-        retries: 3,
-        retryAfter: 180,
-      },
-    };
-
-    let octokit;
-
-    // Create Octokit instance based on available authentication
-    if (token) {
-      // Authenticate using Personal Access Token
-      console.log("Authenticating with Personal Access Token");
-      octokit = new MyOctokit({
-        auth: token,
-        ...octokitOptions,
-      });
-    } else if (appId && privateKey && installationId) {
-      // Authenticate using GitHub App
-      console.log("Authenticating with GitHub App");
-      octokit = new MyOctokit({
-        authStrategy: createAppAuth,
-        auth: {
-          appId,
-          privateKey,
-          installationId,
-        },
-        ...octokitOptions,
-      });
-    } else {
-      throw new Error(
-        "Authentication is required. Please provide either a Personal Access Token (token) or GitHub App credentials (app-id, private-key, and installation-id)."
-      );
-    }
+    
+    // Create authenticated Octokit instance
+    const octokit = createOctokit(token, appId, privateKey, installationId);
 
     // Get all available package types
     const packageTypes = ["npm", "maven", "rubygems", "docker", "container", "nuget"];
-    const packageStats = [];
+    
+    if (outputMode === "org-level") {
+      // Process packages by type (org-level mode)
+      const packageStats = await processOrgLevel(octokit, org, packageTypes);
 
-    // Process each package type
-    for (const packageType of packageTypes) {
-      console.log(`Fetching ${packageType} packages for organization: ${org}`);
+      // Create the final output structure for org-level mode
+      const output = {
+        packages: packageStats,
+      };
 
-      try {
-        // Get all packages for this package type
-        const packages = await octokit.paginate("GET /orgs/{org}/packages", {
-          org,
-          package_type: packageType,
-          per_page: 100,
-        });
+      // Write results to file
+      await writeResultsToFile(output, "org-level");
 
-        console.log(`Found ${packages.length} ${packageType} packages in ${org}`);
+      // If using in GitHub Actions
+      core.setOutput("packageStats", JSON.stringify(output));
 
-        if (packages.length === 0) continue; // Skip if no packages found for this type
+      return output;
+    } else {
+      // Process packages by repository (repo-level mode)
+      const repoStats = await processRepoLevel(octokit, org, packageTypes);
 
-        let totalVersionsCount = 0;
-        const packageDetails = [];
+      // Create the final output structure for repo-level mode
+      const output = {
+        repositories: repoStats,
+      };
 
-        // For detailed mode, get versions for each package
-        if (outputMode === "detailed") {
-          for (const pkg of packages) {
-            console.log(`Fetching versions for package: ${pkg.name}`);
+      // Write results to file
+      await writeResultsToFile(output, "repo-level");
 
-            // Get all versions for this package
-            const versions = await octokit.paginate("GET /orgs/{org}/packages/{package_type}/{package_name}/versions", {
-              org,
-              package_type: packageType,
-              package_name: pkg.name,
-              per_page: 100,
-            });
+      // If using in GitHub Actions
+      core.setOutput("packageStats", JSON.stringify(output));
 
-            totalVersionsCount += versions.length;
-
-            // Add package details with its versions
-            packageDetails.push({
-              name: pkg.name,
-              versions_count: versions.length,
-              versions: versions.map((version) => ({
-                name: version.name,
-                created_at: version.created_at,
-                html_url: version.html_url,
-              })),
-            });
-
-            console.log(`Found ${versions.length} versions for ${pkg.name}`);
-          }
-
-          // Add statistics for this package type to packageStats
-          packageStats.push({
-            type: packageType,
-            total_count: packages.length,
-            total_versions_count: totalVersionsCount,
-            packages: packageDetails,
-          });
-        } else {
-          // For simple mode, only count total versions
-          for (const pkg of packages) {
-            // Get versions count for this package
-            const versions = await octokit.paginate("GET /orgs/{org}/packages/{package_type}/{package_name}/versions", {
-              org,
-              package_type: packageType,
-              package_name: pkg.name,
-              per_page: 100,
-            });
-
-            totalVersionsCount += versions.length;
-          }
-
-          // Add simple statistics for this package type
-          packageStats.push({
-            type: packageType,
-            total_count: packages.length,
-            versions_count: totalVersionsCount,
-          });
-        }
-      } catch (error) {
-        console.error(`Error fetching ${packageType} packages: ${error.message}`);
-        // Continue with the next package type if one fails
-      }
+      return output;
     }
-
-    // Create the final output structure
-    const output = {
-      packages: packageStats,
-    };
-
-    // Create output directory if it doesn't exist
-    const outputDir = __nccwpck_require__.ab + "output";
-    try {
-      await external_fs_.promises.mkdir(__nccwpck_require__.ab + "output", { recursive: true });
-      console.log(`Created or verified output directory at: ${outputDir}`);
-    } catch (err) {
-      console.error(`Error creating output directory: ${err.message}`);
-      throw err;
-    }
-
-    // Determine output filename based on mode
-    const filename = outputMode === "detailed" ? "package-stats-detailed.json" : "package-stats.json";
-    const outputPath = __nccwpck_require__.ab + "output/" + filename;
-
-    // Write the result to the output file
-    await external_fs_.promises.writeFile(outputPath, JSON.stringify(output, null, 2));
-    console.log(`Results written to ${outputPath}`);
-
-    // If using in GitHub Actions
-    core.setOutput("packageStats", JSON.stringify(output));
-
-    return output;
   } catch (error) {
     console.error("Error:", error);
-
     // If using in GitHub Actions
     core.setFailed(error.message);
   }
+}
+
+// Process packages by type (org-level mode)
+async function processOrgLevel(octokit, org, packageTypes) {
+  const packageStats = [];
+
+  // Process each package type
+  for (const packageType of packageTypes) {
+    console.log(`Fetching ${packageType} packages for organization: ${org}`);
+
+    try {
+      // Get all packages for this package type
+      const packages = await octokit.paginate("GET /orgs/{org}/packages", {
+        org,
+        package_type: packageType,
+        per_page: 100,
+      });
+
+      console.log(`Found ${packages.length} ${packageType} packages in ${org}`);
+
+      if (packages.length === 0) continue; // Skip if no packages found for this type
+
+      let totalVersionsCount = 0;
+
+      // For each package, get detailed information including version count
+      for (const pkg of packages) {
+        try {
+          // Get detailed package info
+          const packageInfo = await octokit.request("GET /orgs/{org}/packages/{package_type}/{package_name}", {
+            org,
+            package_type: packageType,
+            package_name: pkg.name,
+          });
+
+          // Add version count to total
+          totalVersionsCount += packageInfo.data.version_count || 0;
+        } catch (error) {
+          console.error(`Error getting details for package ${pkg.name}: ${error.message}`);
+        }
+      }
+
+      // Add simple statistics for this package type
+      packageStats.push({
+        type: packageType,
+        total_package_count: packages.length,
+        versions_count: totalVersionsCount,
+      });
+    } catch (error) {
+      console.error(`Error fetching ${packageType} packages: ${error.message}`);
+      // Continue with the next package type if one fails
+    }
+  }
+
+  return packageStats;
+}
+
+// Process packages by repository (repo-level mode)
+async function processRepoLevel(octokit, org, packageTypes) {
+  // Map to store repository stats
+  const repoMap = new Map();
+
+  // Process each package type
+  for (const packageType of packageTypes) {
+    console.log(`Fetching ${packageType} packages for organization: ${org}`);
+
+    try {
+      // Get all packages for this package type
+      const packages = await octokit.paginate("GET /orgs/{org}/packages", {
+        org,
+        package_type: packageType,
+        per_page: 100,
+      });
+
+      console.log(`Found ${packages.length} ${packageType} packages in ${org}`);
+
+      if (packages.length === 0) continue; // Skip if no packages found for this type
+
+      // For each package, get detailed information including repository association
+      for (const pkg of packages) {
+        try {
+          // Get detailed package info
+          const packageInfo = await octokit.request("GET /orgs/{org}/packages/{package_type}/{package_name}", {
+            org,
+            package_type: packageType,
+            package_name: pkg.name,
+          });
+
+          const packageData = packageInfo.data;
+          const versionCount = packageData.version_count || 0;
+          const repository = packageData.repository;
+
+          // Get the repository name
+          const repoName = repository ? repository.full_name : "unlinked packages";
+
+          // Initialize repository entry if it doesn't exist
+          if (!repoMap.has(repoName)) {
+            repoMap.set(repoName, {
+              name: repoName,
+              total_package_count: 0,
+              total_versions_count: 0,
+              packages: [],
+            });
+          }
+
+          const repoData = repoMap.get(repoName);
+          repoData.total_package_count += 1;
+          repoData.total_versions_count += versionCount;
+
+          // Find package type entry or create it
+          let typeEntry = repoData.packages.find((p) => p.type === packageType);
+          if (!typeEntry) {
+            typeEntry = {
+              type: packageType,
+              package_count: 0,
+              versions_count: 0,
+            };
+            repoData.packages.push(typeEntry);
+          }
+
+          // Update counts for this package type
+          typeEntry.package_count += 1;
+          typeEntry.versions_count += versionCount;
+        } catch (error) {
+          console.error(`Error getting details for package ${pkg.name}: ${error.message}`);
+        }
+      }
+    } catch (error) {
+      console.error(`Error fetching ${packageType} packages: ${error.message}`);
+      // Continue with the next package type if one fails
+    }
+  }
+
+  // Convert map to array for output
+  return Array.from(repoMap.values());
+}
+
+// Write results to output file
+async function writeResultsToFile(output, mode) {
+  // Get the current execution directory
+  const executionDir = process.cwd();
+  console.log(`Current execution directory: ${executionDir}`);
+
+  // Create output directory if it doesn't exist
+  const outputDir = external_path_.join("./output");
+  try {
+    await external_fs_.promises.mkdir(outputDir, { recursive: true });
+    console.log(`Created or verified output directory at: ${outputDir}`);
+  } catch (err) {
+    console.error(`Error creating output directory: ${err.message}`);
+    throw err;
+  }
+
+  // Determine output filename based on mode
+  const filename = mode === "repo-level" ? "package-stats-repo.json" : "package-stats-org.json";
+  const outputPath = external_path_.join(outputDir, filename);
+
+  // Write the result to the output file
+  await external_fs_.promises.writeFile(outputPath, JSON.stringify(output, null, 2));
+  console.log(`Results written to ${outputPath}`);
 }
 
 ;// CONCATENATED MODULE: ./index.js

@@ -5,20 +5,20 @@ A Node.js script to collect and analyze package information from a GitHub organi
 ## Features
 
 - Collects package statistics across multiple package types (npm, Maven, RubyGems, Docker, container, NuGet)
-- Two output modes:
-  - Simple: Summary statistics for each package type
-  - Detailed: Complete listing of packages and their versions
+- Two organization analysis modes:
+  - **org-level**: Groups packages by type (npm, maven, etc.)
+  - **repo-level**: Groups packages by their associated repository
 - Flexible authentication options:
   - GitHub Personal Access Token (PAT)
   - GitHub App authentication
-- Built-in pagination and retry logic for API requests
+- Built-in pagination, throttling, and retry logic for API requests
 
 ## Setup
 
 1. Install dependencies:
 
 ```bash
-npm install @octokit/core @octokit/auth-app @actions/core @octokit/plugin-paginate-rest @octokit/plugin-retry
+npm install @octokit/core @octokit/auth-app @actions/core @octokit/plugin-paginate-rest @octokit/plugin-retry @octokit/plugin-throttling
 ```
 
 2. Set up authentication:
@@ -35,14 +35,14 @@ npm install @octokit/core @octokit/auth-app @actions/core @octokit/plugin-pagina
 
 ## Usage
 
-Run the script with environment variables for your chosen authentication method:
+Run the script with your chosen authentication method:
 
 **Using PAT Authentication:**
 
 ```bash
 # Set environment variables
 export ORG=your-organization
-export MODE=simple
+export MODE=org-level  # or repo-level
 export TOKEN=your-personal-access-token
 
 # Run the script
@@ -54,7 +54,7 @@ node src/index.js
 ```bash
 # Set environment variables
 export ORG=your-organization
-export MODE=simple
+export MODE=org-level  # or repo-level
 export APP_ID=your-github-app-id
 export PRIVATE_KEY="-----BEGIN RSA PRIVATE KEY-----..."
 export INSTALLATION_ID=your-installation-id
@@ -65,12 +65,12 @@ node src/index.js
 
 The script will generate one of the following files based on the mode:
 
-- `package-stats.json`: Contains summary statistics for each package type when using "simple" mode
-- `package-stats-detailed.json`: Contains detailed package and version information when using "detailed" mode
+- `package-stats-org.json`: Contains statistics grouped by package type (org-level mode)
+- `package-stats-repo.json`: Contains statistics grouped by repository (repo-level mode)
 
 ## Output Formats
 
-### Simple Mode (package-stats.json)
+### Org-Level Mode (package-stats-org.json)
 
 ```json
 {
@@ -89,26 +89,42 @@ The script will generate one of the following files based on the mode:
 }
 ```
 
-### Detailed Mode (package-stats-detailed.json)
+### Repo-Level Mode (package-stats-repo.json)
 
 ```json
 {
-  "packages": [
+  "repositories": [
     {
-      "type": "npm",
-      "total_count": 10,
-      "total_versions_count": 52,
+      "name": "owner/repo-name",
+      "total_count": 3,
+      "total_versions_count": 15,
       "packages": [
         {
-          "name": "package-name",
-          "versions_count": 12,
-          "versions": [
-            {
-              "name": "1.0.0",
-              "created_at": "2022-01-01T00:00:00Z",
-              "html_url": "https://github.com/org/package-name/1.0.0"
-            }
-          ]
+          "name": "package-name-1",
+          "type": "npm",
+          "versions_count": 8
+        },
+        {
+          "name": "package-name-2",
+          "type": "container",
+          "versions_count": 7
+        }
+      ]
+    },
+    {
+      "name": "unlinked-packages",
+      "total_count": 2,
+      "total_versions_count": 5,
+      "packages": [
+        {
+          "name": "unlinked-package-1",
+          "type": "npm",
+          "versions_count": 3
+        },
+        {
+          "name": "unlinked-package-2",
+          "type": "npm",
+          "versions_count": 2
         }
       ]
     }
@@ -118,7 +134,7 @@ The script will generate one of the following files based on the mode:
 
 ## GitHub Actions Integration
 
-This script can be used in GitHub Actions workflows as a composite action. It sets the `package-stats` output that can be used by other steps in your workflow.
+This script can be used in GitHub Actions workflows as a GitHub Action. It sets the `packageStats` output that can be used by other steps in your workflow.
 
 Example workflow using Personal Access Token:
 
@@ -136,15 +152,15 @@ jobs:
         uses: ./
         with:
           org: "myorg"
-          mode: "simple"
+          mode: "org-level"
           token: ${{ secrets.GITHUB_TOKEN }}
 
       # Use the output in subsequent steps
       - name: Use stats output
-        run: echo '${{ steps.stats.outputs.package-stats }}'
+        run: echo '${{ steps.stats.outputs.packageStats }}'
 ```
 
-Example workflow using GitHub App authentication:
+Example workflow using GitHub App authentication with repo-level mode:
 
 ```yaml
 name: Collect Package Stats
@@ -160,12 +176,12 @@ jobs:
         uses: ./
         with:
           org: "myorg"
-          mode: "detailed"
+          mode: "repo-level"
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.PRIVATE_KEY }}
           installation-id: ${{ secrets.INSTALLATION_ID }}
 
       # Use the output in subsequent steps
       - name: Use stats output
-        run: echo '${{ steps.stats.outputs.package-stats }}'
+        run: echo '${{ steps.stats.outputs.packageStats }}'
 ```
